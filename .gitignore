@@ -1,0 +1,37 @@
+# Environment & secrets
+.env
+.env.*
+*credentials*.json
+cwm*.json
+service-account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Generated / runtime
+temp_image.jpg
+detected_image.jpg
+
+# Binaries (do not commit vendored executables)
+*.exe
+
+# Go
+backend/bin/
+
+# Mobile / Node
+node_modules/
+.expo/
+.expo-shared/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
