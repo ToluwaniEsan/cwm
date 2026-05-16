@@ -1,9 +1,11 @@
 # tests/test_cwm.py — CWM Test Suite
 # Run with: pytest tests/ -v
 
+import io
+import os
+
 import pytest
 from unittest.mock import patch, MagicMock, mock_open
-import io
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 1: classify_food — handles missing file gracefully
@@ -16,41 +18,29 @@ def test_classify_food_file_not_found():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 2: classify_food — correctly filters food labels from Vision API response
+# Test 2: classify_food — parses HF Inference API labels
 # ─────────────────────────────────────────────────────────────────────────────
 def test_classify_food_filters_labels():
-    """classify_food returns only food-related labels."""
+    """classify_food returns top food labels from HF classification JSON."""
     from food_recognition import classify_food
 
-    # Mock the Vision API client
-    mock_label_pizza = MagicMock()
-    mock_label_pizza.description = "Pizza"
-    mock_label_pizza.score = 0.98
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = [
+        {"label": "pizza", "score": 0.92},
+        {"label": "bread", "score": 0.01},
+        {"label": "fried_rice", "score": 0.15},
+    ]
+    mock_resp.raise_for_status = MagicMock()
 
-    mock_label_table = MagicMock()
-    mock_label_table.description = "Table"
-    mock_label_table.score = 0.90
+    with patch.dict("os.environ", {"HF_TOKEN": "hf_test"}, clear=False), patch(
+        "food_recognition.requests.post", return_value=mock_resp
+    ), patch("builtins.open", mock_open(read_data=b"\xff\xd8\xff")):
+        result = classify_food("fake_image.jpg")
 
-    mock_label_food = MagicMock()
-    mock_label_food.description = "Food"
-    mock_label_food.score = 0.95
-
-    mock_response = MagicMock()
-    mock_response.error.message = ""
-    mock_response.label_annotations = [mock_label_pizza, mock_label_table, mock_label_food]
-
-    with patch("food_recognition.vision.ImageAnnotatorClient") as mock_client_cls:
-        mock_client = MagicMock()
-        mock_client.label_detection.return_value = mock_response
-        mock_client_cls.return_value = mock_client
-
-        image_data = b"\xff\xd8\xff"  # minimal JPEG header
-        with patch("builtins.open", mock_open(read_data=image_data)):
-            result = classify_food("fake_image.jpg")
-
-    assert "pizza" in result, "pizza should be detected"
-    assert "food" in result, "food label should be detected"
-    assert "table" not in result, "table is not food and should be excluded"
+    assert "pizza" in result
+    assert "fried rice" in result
+    assert "bread" not in result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,3 +249,41 @@ def test_normalize_food_query_strips_filler():
 
     assert normalize_food_query("Can you get me the recipe for pizza") == "pizza"
     assert normalize_food_query("fried rice") == "fried rice"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 13: classify_food — HF Inference API auth header
+# ─────────────────────────────────────────────────────────────────────────────
+def test_classify_food_with_hf_token():
+    """classify_food POSTs to HF Inference with Bearer token."""
+    from food_recognition import classify_food
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = [{"label": "pizza", "score": 0.9}]
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch.dict(
+        os.environ,
+        {"HF_TOKEN": "hf_test", "HF_VISION_MODEL": "nateraw/food"},
+        clear=False,
+    ), patch("food_recognition.requests.post", return_value=mock_resp) as mock_post, patch(
+        "builtins.open", mock_open(read_data=b"\xff\xd8\xff")
+    ):
+        result = classify_food("fake.jpg")
+
+    assert "pizza" in result
+    assert mock_post.call_args.kwargs["headers"]["Authorization"] == "Bearer hf_test"
+    assert "router.huggingface.co" in mock_post.call_args.args[0]
+    assert "nateraw/food" in mock_post.call_args.args[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 14: vision_is_configured — false without HF token
+# ─────────────────────────────────────────────────────────────────────────────
+def test_vision_not_configured_without_token():
+    """vision_is_configured is False when HF_TOKEN is missing."""
+    from food_recognition import vision_is_configured
+
+    with patch("food_recognition.get_hf_token", return_value=None):
+        assert vision_is_configured() is False

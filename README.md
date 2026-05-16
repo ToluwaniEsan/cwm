@@ -2,18 +2,21 @@
 
 AI-assisted food discovery: identify food from a photo (like circle-and-search for dishes), then fetch recipes with ingredients and cooking steps.
 
+**Full architecture and function reference:** see [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
+
 ## Features
 
 - **Streamlit web app** — upload a photo or search by name; browse recipes with full details from [TheMealDB](https://www.themealdb.com/)
-- **Google Cloud Vision** — label detection filtered for food-related items
-- **Screen capture CLI** — `food_image_detection.py` captures the screen and runs the same pipeline (optional)
-- **Go REST API** — `backend/` for mobile or other clients
-- **React Native mobile UI** — `mobile-branch/react-native-ui/` (Expo) talking to the Go API
+- **Hugging Face Vision** — food photo classification via [Inference API](https://huggingface.co/docs/api-inference/index) (no Google Cloud billing)
+- **Voice search** — local Whisper ASR + optional TTS
+- **FoodAgent** — detect → recipes → top recipe details in one loop
+- **Screen capture CLI** — `food_image_detection.py` (optional)
+- **Go REST API** — `backend/` (still uses Google Vision if configured; optional)
 
 ## Prerequisites
 
 - Python 3.10+
-- [Google Cloud Vision API](https://cloud.google.com/vision) enabled and credentials configured (`GOOGLE_APPLICATION_CREDENTIALS` pointing to a service account JSON file — **never commit this file**)
+- [Hugging Face](https://huggingface.co/) account and access token in `.env` as `HF_TOKEN` (**never commit `.env`**)
 - Optional: Go 1.21+ for the API server; Node.js for the mobile app
 
 ## Quick start (Streamlit)
@@ -24,11 +27,16 @@ python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
-set GOOGLE_APPLICATION_CREDENTIALS=path\to\your-service-account.json
+copy .env.example .env
+# Edit .env: HF_TOKEN=hf_...  and optionally HF_VISION_MODEL=nateraw/food
 streamlit run app.py
 ```
 
 Or on Windows: `streamlit.cmd run app.py`
+
+Get a token: [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (read access is enough).
+
+**Note:** First photo request may take 15–20s while the HF model loads. Free tier has rate limits.
 
 ## Screen capture CLI
 
@@ -43,7 +51,7 @@ cd backend
 go run .
 ```
 
-Default port: `4000` (see `backend/main.go`). Set `GOOGLE_APPLICATION_CREDENTIALS` in `.env` or the environment.
+Default port: `4000`. The Go backend is separate from the Streamlit HF setup.
 
 ## Mobile app
 
@@ -51,8 +59,6 @@ Default port: `4000` (see `backend/main.go`). Set `GOOGLE_APPLICATION_CREDENTIAL
 cd mobile-branch/react-native-ui
 npx expo start
 ```
-
-Point `API_BASE` in `App.tsx` at your machine’s IP when testing on a physical device.
 
 ## Tests
 
@@ -65,17 +71,18 @@ pytest tests/ -v
 | Path | Description |
 |------|-------------|
 | `app.py` | Streamlit UI |
-| `food_recognition.py` | Vision API food classification |
+| `food_recognition.py` | HF Inference food classification |
 | `recipe_retrieval.py` | TheMealDB search and detail |
-| `food_image_detection.py` | Screenshot → detect → recipes (CLI) |
+| `agent.py` | FoodAgent pipeline |
+| `voice.py` | Whisper + TTS |
+| `food_image_detection.py` | Screenshot CLI |
 | `backend/` | Go HTTP API |
-| `mobile-branch/` | React Native / Expo client |
 | `tests/` | Pytest suite |
+
+## Recipe coverage
+
+Recipes come from [TheMealDB](https://www.themealdb.com/) (limited catalog). Some dishes (e.g. regional names) may not appear even when photo detection works.
 
 ## Security
 
-Do not commit Google Cloud JSON keys or `.env` files. Use `.gitignore` and rotate any key that was ever pushed to a public repository.
-
-## License
-
-See upstream repository history. Original concept: food photo → recipe ingredients and steps for home cooking.
+Do not commit API keys or `.env` files. Use `.gitignore` and rotate any key that was ever pushed to a public repository.

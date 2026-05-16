@@ -1,14 +1,13 @@
 # app.py — CWM Food Detection & Recipe Finder (Multimodal + Agentic)
 
 import io
-import os
-from pathlib import Path
 from typing import Any
 
 import streamlit as st
 from PIL import Image
 
 from agent import FoodAgent
+from food_recognition import vision_is_configured
 from recipe_retrieval import get_recipe_detail, normalize_food_query
 from voice import record_audio, speak_recipe_summary, transcribe_audio
 
@@ -94,38 +93,49 @@ st.markdown("""
         border: 1px solid rgba(255,255,255,0.08);
     }
     div[data-testid="stMetric"] label { color: #ffc107 !important; }
+    /* Keep uploaded photo preview compact */
+    [data-testid="stImage"] img {
+        max-height: 220px !important;
+        width: auto !important;
+        object-fit: contain;
+        border-radius: 12px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── Credentials helper ────────────────────────────────────────────────────────
-def _vision_credentials_ok() -> tuple[bool, str]:
-    """Check whether Google Vision credentials are configured and readable."""
-    path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-    if path and Path(path).is_file():
-        return True, path
-    return False, path
-
-
-def _apply_credentials_from_sidebar() -> bool:
-    """Let user set credentials path in sidebar (persists for session)."""
-    if "gcp_creds_path" not in st.session_state:
-        st.session_state.gcp_creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-
-    path = st.session_state.gcp_creds_path.strip()
-    if path and Path(path).is_file():
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
-        return True
-    return False
-
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+def _to_rgb(img: Image.Image) -> Image.Image:
+    """Convert PNG/transparency modes to RGB so JPEG export works."""
+    if img.mode in ("RGBA", "LA"):
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[-1])
+        return background
+    if img.mode == "P":
+        return _to_rgb(img.convert("RGBA"))
+    if img.mode != "RGB":
+        return img.convert("RGB")
+    return img
+
+
+# Max size for on-screen preview only (full-res still sent to HF for classification)
+PREVIEW_MAX_SIZE = (400, 280)
+
+
+def make_preview(img: Image.Image, max_size: tuple[int, int] = PREVIEW_MAX_SIZE) -> Image.Image:
+    """Return a smaller copy for UI display so results stay above the fold."""
+    preview = img.copy()
+    preview.thumbnail(max_size, Image.Resampling.LANCZOS)
+    return preview
+
+
 def resize_image(image_file, max_size: tuple[int, int] = (1024, 1024)) -> io.BytesIO:
-    """Resize uploaded image for Vision API and display."""
+    """Resize uploaded image for display and HF classification."""
     with Image.open(image_file) as img:
+        img = _to_rgb(img)
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
         output = io.BytesIO()
-        img.save(output, format="JPEG")
+        img.save(output, format="JPEG", quality=90)
         output.seek(0)
         return output
 
@@ -164,8 +174,8 @@ def _display_agent_result(result: dict[str, Any], *, query_label: str) -> None:
 
     if err == "step1_detection":
         st.error(
-            "**Photo detection failed** — Google Vision could not find food in this image. "
-            "Check credentials in the sidebar, or try **typing** / **speaking** the dish name instead."
+            "**Photo detection failed** — could not identify food in this image. "
+            "Check **HF_TOKEN** in `.env`, wait if the model is loading, or try **typing** / **speaking** the dish name."
         )
     elif err:
         st.warning(result.get("error_message", "Something went wrong."))
@@ -208,7 +218,7 @@ def _render_recipes(recipes: list[dict]) -> None:
         with cols[idx % len(cols)]:
             st.markdown('<div class="cwm-card">', unsafe_allow_html=True)
             if recipe.get("thumbnail"):
-                st.image(recipe["thumbnail"], width="stretch")
+                st.image(recipe["thumbnail"], width=120)
             st.markdown(f"#### {recipe['title']}")
             st.link_button("Open recipe", recipe["url"], use_container_width=True)
             if st.button("Full details", key=f"detail_{recipe['id']}", use_container_width=True):
@@ -229,25 +239,16 @@ def _render_recipes(recipes: list[dict]) -> None:
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### ⚙️ Setup")
-    vision_ok = _apply_credentials_from_sidebar()
+    st.markdown("### ⚙️ Photo detection (Hugging Face)")
 
-    st.text_input(
-        "Google Vision JSON path",
-        key="gcp_creds_path",
-        placeholder=r"C:\Users\esant\secrets\your-key.json",
-        help="Required for photo detection. Paste path, then search again.",
-    )
-    _apply_credentials_from_sidebar()
-    vision_ok = _vision_credentials_ok()[0]
-
-    if vision_ok:
-        st.success("Vision API ready")
+    if vision_is_configured():
+        st.success("HF Vision ready (.env)")
     else:
         st.warning(
-            "Vision not configured — **text & voice search still work**. "
-            "In PowerShell run:\n\n"
-            "`$env:GOOGLE_APPLICATION_CREDENTIALS = \"C:\\path\\to\\key.json\"`"
+            "Photo detection not configured — **text & voice still work**. "
+            "Add to **`.env`** in the project folder:\n\n"
+            "`HF_TOKEN=hf_...`\n\n"
+            "Get a token: [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)"
         )
 
     st.markdown("---")
@@ -255,7 +256,7 @@ with st.sidebar:
     st.markdown(
         "- Say dish names clearly: *\"pizza\"*, *\"fried rice\"*\n"
         "- Type or speak the **dish name**, not full sentences\n"
-        "- Photo search needs Vision credentials above"
+        "- First photo scan may be slow while the HF model loads"
     )
 
 # ── Hero ──────────────────────────────────────────────────────────────────────
@@ -302,15 +303,25 @@ detect_btn = False
 if uploaded_file is not None:
     try:
         resized = resize_image(uploaded_file)
-        image = Image.open(resized)
-        st.image(image, caption="Your photo", width="stretch")
+        image = _to_rgb(Image.open(resized))
         temp_path = "temp_image.jpg"
-        image.save(temp_path)
-        detect_btn = st.button(
-            "🔍 Detect food & find recipes",
-            type="primary",
-            use_container_width=True,
-        )
+        image.save(temp_path, format="JPEG", quality=90)
+
+        preview_col, action_col = st.columns([1, 2], gap="medium")
+        with preview_col:
+            st.image(
+                make_preview(image),
+                caption="Your photo",
+                width=260,
+            )
+        with action_col:
+            st.markdown("##### Ready to scan")
+            st.caption("We analyze the full-resolution file; only the preview is shrunk here.")
+            detect_btn = st.button(
+                "🔍 Detect food & find recipes",
+                type="primary",
+                use_container_width=True,
+            )
     except Exception as e:
         st.error(f"Image error: {e}")
 
@@ -344,9 +355,9 @@ elif voice_btn:
         st.error(f"Voice failed: {e}")
 
 elif detect_btn and temp_path:
-    if not _vision_credentials_ok()[0]:
+    if not vision_is_configured():
         st.error(
-            "Set your Google credentials JSON path in the **sidebar** first, "
+            "Add **HF_TOKEN** to your **`.env`** file, "
             "then click detect again."
         )
     else:
